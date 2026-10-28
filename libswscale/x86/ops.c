@@ -26,7 +26,7 @@
 
 #include "../ops_chain.h"
 #include "../uops.h"
-#include "../uops_macros.h"
+#include "uops_macros.h"
 
 static int setup_rw_packed(const SwsImplParams *params, SwsImplResult *out)
 {
@@ -726,7 +726,8 @@ static int compile_x86(SwsContext *ctx, const SwsOpList *ops, SwsCompiledOp *out
     SwsUOpFlags flags = SWS_UOP_FLAG_PSHUFB
                       | SWS_UOP_FLAG_EXPAND_BIT
                       | SWS_UOP_FLAG_READ_PALETTE
-                      | SWS_UOP_FLAG_ADD;
+                      | SWS_UOP_FLAG_ADD
+                      | SWS_UOP_FLAG_PUNNING;
     if (EXTERNAL_FMA3(cpu_flags))
         flags |= SWS_UOP_FLAG_FMA;
 

@@ -463,7 +463,6 @@ static int vorbis_packet(AVFormatContext *s, int idx)
     int duration, flags = 0;
     int bos, skip_packet = 0;
     int ret, new_extradata_size;
-    PutByteContext pb;
 
     if (os->psize == 0)
         return AVERROR_INVALIDDATA;
@@ -478,10 +477,10 @@ static int vorbis_packet(AVFormatContext *s, int idx)
 
     bos = os->page_start && os->page_pos == priv->bos_page_pos;
 
-    if (bos) {
+    if (bos || (os->page_start && os->lastpts == AV_NOPTS_VALUE))
         av_vorbis_parse_reset(priv->vp);
+    if (bos)
         priv->last_page_granule = 0;
-    }
 
     duration = av_vorbis_parse_frame_flags(priv->vp, os->buf + os->pstart, 1, &flags);
     if (duration < 0) {
@@ -497,12 +496,41 @@ static int vorbis_packet(AVFormatContext *s, int idx)
     if (!priv->ts_offset)
         priv->ts_offset = os->pduration;
 
-    /* Initial position shift to account for encoder delay. */
+    /* Initial position shift to account for encoder delay, or page scan
+     * to recover the page start timestamp after a seek. */
     if (bos) {
-        if (os->lastpts != AV_NOPTS_VALUE)
+        if (os->lastpts != AV_NOPTS_VALUE) {
+            if (s->streams[idx]->start_time == AV_NOPTS_VALUE) {
+                s->streams[idx]->start_time = os->lastpts;
+                if (s->streams[idx]->duration != AV_NOPTS_VALUE)
+                    s->streams[idx]->duration -= s->streams[idx]->start_time;
+            }
             os->lastpts -= priv->ts_offset;
+        }
         if (os->lastdts != AV_NOPTS_VALUE)
             os->lastdts -= priv->ts_offset;
+    } else if (os->page_start && os->lastpts == AV_NOPTS_VALUE &&
+               !(os->flags & OGG_FLAG_EOS) && (int64_t)os->granule >= 0) {
+        int seg, page_duration = os->pduration;
+        uint8_t *last_pkt = os->buf + os->pstart + os->psize;
+        uint8_t *next_pkt = last_pkt;
+
+        for (seg = os->segp; seg < os->nsegs; seg++) {
+            next_pkt += os->segments[seg];
+            if (os->segments[seg] < 255 && next_pkt != last_pkt) {
+                int pkt_flags = 0;
+                int d = av_vorbis_parse_frame_flags(priv->vp, last_pkt, 1, &pkt_flags);
+                if (d < 0) {
+                    page_duration = os->granule;
+                    break;
+                }
+                page_duration += d;
+                last_pkt = next_pkt;
+            }
+        }
+        av_vorbis_parse_frame_flags(priv->vp, os->buf + os->pstart, 1, &flags);
+        os->lastpts =
+        os->lastdts = os->granule - page_duration;
     }
 
     /* Broken files may have granule=0 on pages that contain audio data.
@@ -580,20 +608,32 @@ static int vorbis_packet(AVFormatContext *s, int idx)
     /* All three headers for the new chained stream have been collected;
      * pack them into new extradata to be attached to the next data packet. */
     if (priv->header && priv->comment && priv->setup) {
-        new_extradata_size = priv->header_size + priv->comment_size + priv->setup_size + 6;
+        uint64_t total_size = (uint64_t)priv->header_size + priv->comment_size +
+                              priv->setup_size;
+        uint8_t *p;
+
+        /* Use Xiph lacing like vorbis_header() does: 16-bit sizes cannot
+         * describe headers larger than 64 KiB, e.g. a comment header with
+         * embedded cover art. */
+        if (total_size + total_size / 255 + 3 > INT_MAX)
+            return AVERROR_INVALIDDATA;
+        new_extradata_size = 1 + priv->header_size / 255 + 1 +
+                             priv->comment_size / 255 + 1 + total_size;
 
         ret = av_reallocp(&os->new_extradata, new_extradata_size);
         if (ret < 0)
             return ret;
 
         os->new_extradata_size = new_extradata_size;
-        bytestream2_init_writer(&pb, os->new_extradata, new_extradata_size);
-        bytestream2_put_be16(&pb, priv->header_size);
-        bytestream2_put_buffer(&pb, priv->header, priv->header_size);
-        bytestream2_put_be16(&pb, priv->comment_size);
-        bytestream2_put_buffer(&pb, priv->comment, priv->comment_size);
-        bytestream2_put_be16(&pb, priv->setup_size);
-        bytestream2_put_buffer(&pb, priv->setup, priv->setup_size);
+        p     = os->new_extradata;
+        *p++  = 2;
+        p    += av_xiphlacing(p, priv->header_size);
+        p    += av_xiphlacing(p, priv->comment_size);
+        memcpy(p, priv->header, priv->header_size);
+        p    += priv->header_size;
+        memcpy(p, priv->comment, priv->comment_size);
+        p    += priv->comment_size;
+        memcpy(p, priv->setup, priv->setup_size);
 
         av_freep(&priv->header);
         priv->header_size = 0;
