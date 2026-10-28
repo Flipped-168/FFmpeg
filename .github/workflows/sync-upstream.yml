@@ -29,6 +29,6 @@ jobs:
           find .github/workflows -type f ! -name "sync-upstream.yml" -delete
       - name: Commit and push
         run: |
-          git add .github/workflows
+          git add -f .github/workflows
           git commit -m "chore: preserve fork sync workflow" --allow-empty
           git push
