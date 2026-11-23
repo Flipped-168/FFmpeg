@@ -56,6 +56,11 @@ fate-mov-vpcc-reserved-color-tags: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -v erro
 FATE_MOV-$(call DEMDEC, MOV, RAWVIDEO) += fate-mov-uncv-rgb24
 fate-mov-uncv-rgb24: CMD = framecrc -i $(TARGET_SAMPLES)/mov/uncv-rgb24.mp4
 
+# Qclp with a version 0 sound description, no frame size stored;
+# 30 packets cross the first 25-packet chunk
+FATE_MOV-$(call DEMMUX, MOV, FRAMECRC, PIPE_PROTOCOL) += fate-mov-qclp-stsd-v0
+fate-mov-qclp-stsd-v0: CMD = framecrc -i $(TARGET_SAMPLES)/mov/clip43qt3-hi.mov -map 0:a -c copy -frames:a 30
+
 FATE_MOV_FFPROBE-$(CONFIG_MOV_DEMUXER) += fate-ffprobe-stream-entries-tmcd \
                                        fate-ffprobe-group-stream-entries-tmcd \
                                        fate-ffprobe-show-groups-tmcd
@@ -371,6 +376,10 @@ FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MP4 MOV, AAC_PARSER) \
                           += fate-mov-mp4-edst-remainder
 fate-mov-mp4-edst-remainder: CMD = stream_remux mov $(TARGET_SAMPLES)/audiomatch/tones_fdkaac_44100_stereo_aac_lc.m4a "" mp4 "" "" "-c:a copy"
 
+# QDMC configuration must be written back in a wave atom
+FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MOV) += fate-mov-qdmc-remux
+fate-mov-qdmc-remux: CMD = transcode mov $(TARGET_SAMPLES)/qdmc/rumcoke.mov mov "-c copy -t 0.4" "-c copy"
+
 # Reserved colour values must not be written to colr
 FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MP4 MOV, H264_PARSER H264_DECODER) += fate-mov-colr-reserved-color-tags
 fate-mov-colr-reserved-color-tags: CMD = stream_remux mov $(TARGET_SAMPLES)/mov/test_iibbibb.mp4 "" mp4 \
@@ -432,6 +441,12 @@ FATE_MOV_FFMPEG-$(call TRANSCODE, PCM_F32LE, MP4 MOV, WAV_DEMUXER PAN_FILTER) \
 fate-mov-mp4-pcm-float: tests/data/asynth-44100-1.wav
 fate-mov-mp4-pcm-float: CMD = transcode wav $(TARGET_PATH)/tests/data/asynth-44100-1.wav mp4 "-af aresample,pan=FR+FL+FR|c0=c0|c1=c0|c2=c0 -c:a pcm_f32le" "-map 0 -c copy -frames:a 0"
 
+# Test IMA4 above 65535 Hz, in a version 2 sound description
+FATE_MOV_FFMPEG-$(call REMUX, MOV, ADPCM_IMA_QT_ENCODER WAV_DEMUXER PCM_S16LE_DECODER ARESAMPLE_FILTER) \
+                          += fate-mov-ima4-96k
+fate-mov-ima4-96k: tests/data/asynth-96000-1.wav
+fate-mov-ima4-96k: CMD = transcode wav $(TARGET_PATH)/tests/data/asynth-96000-1.wav mov "-af aresample -t 0.002 -c:a adpcm_ima_qt" "-c copy"
+
 fate-mov-pcm-remux: tests/data/asynth-44100-1.wav
 fate-mov-pcm-remux: CMD = md5 -i $(TARGET_PATH)/tests/data/asynth-44100-1.wav -map 0 -c copy -fflags +bitexact -f mp4
 fate-mov-pcm-remux: CMP = oneline
@@ -475,6 +490,28 @@ fate-mov-3gp-udta-metadata: CMD = transcode lavfi "color=s=32x32:r=1:d=1" 3gp \
      -metadata genre-eng=Genre -metadata comment-eng=Comment -metadata album-eng=Album \
      -metadata copyright-eng=Copyright" \
     "-c copy" "-show_entries format_tags"
+
+# yuv2 defaults to full range BT.601; a colr matrix or a decoder option still takes precedence.
+MOV_YUV2_FILTERS = COLOR FORMAT SCALE
+FATE_MOV_FFMPEG_FFPROBE-$(call FILTERDEMDECENCMUX, $(MOV_YUV2_FILTERS), MOV, RAWVIDEO, RAWVIDEO, MOV) \
+    += fate-mov-yuv2-color-default fate-mov-yuv2-color-range
+FATE_MOV_FFMPEG_FFPROBE-$(call FILTERDEMDECENCMUX, $(MOV_YUV2_FILTERS) SETPARAMS, MOV, RAWVIDEO, RAWVIDEO, MOV) \
+    += fate-mov-yuv2-color-colr
+
+MOV_YUV2_SRC = color=c=black:s=32x32:r=1:d=1,format=yuv422p
+MOV_YUV2_COLR_SRC = $(MOV_YUV2_SRC),setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709
+MOV_YUV2_GEN = $(FFMPEG) -nostdin -v error -filter_complex $(1) \
+    -pix_fmt yuyv422 -color_range pc -c:v rawvideo -tag:v yuv2 \
+    -threads 1 -flags +bitexact -fflags +bitexact -f mov -y
+MOV_YUV2_PROBE = ffprobe$(PROGSSUF)$(EXESUF) -v error -bitexact \
+    -show_entries frame=color_range,color_space -of default=nw=1
+
+fate-mov-yuv2-color-default: CMD = run_with_temp \
+    "$(call MOV_YUV2_GEN,$(MOV_YUV2_SRC))" "$(MOV_YUV2_PROBE)" mov
+fate-mov-yuv2-color-colr: CMD = run_with_temp \
+    "$(call MOV_YUV2_GEN,$(MOV_YUV2_COLR_SRC))" "$(MOV_YUV2_PROBE)" mov
+fate-mov-yuv2-color-range: CMD = run_with_temp \
+    "$(call MOV_YUV2_GEN,$(MOV_YUV2_SRC))" "$(MOV_YUV2_PROBE) -color_range tv" mov
 
 FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, COLOR_FILTER SETPTS_FILTER MPEG4_ENCODER \
                                       MOV_MUXER MOV_DEMUXER FILE_PROTOCOL)      \
